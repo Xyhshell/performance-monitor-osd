@@ -1,0 +1,75 @@
+# Performance Monitor OSD Dependencies
+
+## Python Dependencies
+
+### Core Requirements
+- PyQt5==5.15.4
+  - GUI framework for the OSD overlay
+
+### Optional Hardware Monitoring
+- psutil==5.9.4
+  - CPU frequency, usage monitoring
+
+- nvidia-ml-py==11.450.0
+  - NVIDIA GPU monitoring via NVML
+
+- pythonnet==3.0.1
+  - .NET runtime for LibreHardwareMonitorLib.dll integration
+
+## Installation Commands
+
+### Basic Installation
+```bash
+pip install PyQt5 psutil nvidia-ml-py pythonnet
+```
+
+### Minimal Installation (Hardware-only features disabled)
+```bash
+pip install PyQt5
+```
+
+### Optional: NVIDIA GPU Support
+```bash
+pip install PyQt5 psutil nvidia-ml-py
+```
+
+### Optional: Full Hardware Support
+```bash
+pip install PyQt5 psutil nvidia-ml-py pythonnet
+```
+
+## LibreHardwareMonitor Setup
+
+### Windows (Recommended)
+1. Download from: https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases
+2. Extract to any location (e.g., `C:\LibreHardwareMonitor`)
+3. Ensure `LibreHardwareMonitorLib.dll` is accessible (in the same directory as the Python script or in the search paths)
+
+### Linux/macOS
+See LibreHardwareMonitor documentation for installation instructions
+
+## Runtime Dependencies
+
+### Shared Libraries (Windows)
+- `LibreHardwareMonitorLib.dll` (included via pythonnet)
+- `python27.dll` (part of pythonnet runtime)
+
+## Usage Notes
+
+1. The application requires administrator privileges for DXGI Desktop Duplication
+2. Some hardware sensor readings may be restricted without admin rights
+3. NVIDIA GPU monitoring requires NVIDIA drivers with NVML support
+4. Hardware temperatures are provided by LibreHardwareMonitor Lib
+
+## Dependency Tree
+
+```
+performance-monitor-osd/
+├── main.py                    # Application entry point
+├── ui.py                      # GUI components
+├── monitor.py                 # Hardware monitoring
+├── settings.py                # Configuration management
+├── fps_low.py                 # FPS analysis engine
+├── settings.json              # Default configuration
+└── requirements.txt           # This file
+```
