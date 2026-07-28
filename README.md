@@ -9,7 +9,7 @@
 性能监控 OSD 是一个基于 PyQt5 的桌面工具，以半透明覆盖层的形式显示 CPU、GPU 和 FPS 实时数据。它支持 1% Low FPS、帧时间分析、多种主题，并兼容 NVIDIA FrameView 算法，帮助您精准识别性能瓶颈。
 
 ![OSD 预览](IMG/1.png) ![游戏实测](IMG/2.png)
-![游戏实测](IMG/info.png)
+![for me](IMG/info.png)
 ---
 info
 ## 目录
@@ -199,5 +199,5 @@ python main.py
 
 **版本**：1.0  
 **发布日期**：2026-07-28  
-**作者**：[jingmo](https://github.com/jingmo)  
-**项目地址**：[GitHub](https://github.com/jingmo/performance-monitor-osd)
+**作者**：[jingmo](https://github.com/Xyhshell)  
+**项目地址**：[GitHub](https://github.com/Xyhshell/performance-monitor-osd)
