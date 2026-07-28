@@ -201,4 +201,3 @@ python main.py
 **发布日期**：2026-07-28  
 **作者**：[jingmo](https://github.com/jingmo)  
 **项目地址**：[GitHub](https://github.com/jingmo/performance-monitor-osd)
-```
