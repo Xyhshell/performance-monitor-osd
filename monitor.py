@@ -1,26 +1,34 @@
 """
-monitor.py - 硬件监控模块
+monitor.py - 跨平台硬件监控 + GDI FPS 采集（稳健版）
+支持：Intel / AMD CPU & GPU，NVIDIA 独显，Intel 核显，AMD 核显/独显
+FPS 采集：GDI 为主，dxcam 可选（若安装则优先）
 """
 
 import os
 import sys
 import time
-import struct
 import threading
 import ctypes
 import ctypes.wintypes
 from collections import deque
 from dataclasses import dataclass
 from typing import Tuple, Optional
+
+# ---------- 可选 dxcam ----------
+try:
+    import dxcam
+    HAS_DXCAM = True
+except ImportError:
+    HAS_DXCAM = False
+
 from fps_low import FPSAnalyzer
 
+# ---------- GDI 常量 ----------
 SRCCOPY = 0x00CC0020
 DIB_RGB_COLORS = 0
 BI_RGB = 0
 user32 = ctypes.windll.user32
 gdi32 = ctypes.windll.gdi32
-kernel32 = ctypes.windll.kernel32
-
 
 class BITMAPINFOHEADER(ctypes.Structure):
     _fields_ = [
@@ -37,14 +45,13 @@ class BITMAPINFOHEADER(ctypes.Structure):
         ('biClrImportant', ctypes.wintypes.DWORD),
     ]
 
-
 class BITMAPINFO(ctypes.Structure):
     _fields_ = [
         ('bmiHeader', BITMAPINFOHEADER),
         ('bmiColors', ctypes.wintypes.DWORD * 3),
     ]
 
-
+# ---------- 依赖 ----------
 try:
     import psutil
     HAS_PSUTIL = True
@@ -60,13 +67,12 @@ except ImportError:
 HAS_DLL = False
 _Computer = None
 
-
 def _init_dll():
     global HAS_DLL, _Computer
     try:
         import clr
     except ImportError:
-        print("[Monitor] pythonnet 未安装，请运行: pip install pythonnet")
+        print("[Monitor] pythonnet 未安装，硬件传感器将受限。请安装: pip install pythonnet")
         return False
 
     search_paths = [
@@ -83,7 +89,7 @@ def _init_dll():
             break
 
     if not dll_path:
-        print("[Monitor] LibreHardwareMonitorLib.dll 未找到")
+        print("[Monitor] LibreHardwareMonitorLib.dll 未找到，硬件传感器将不可用。")
         return False
 
     try:
@@ -97,7 +103,7 @@ def _init_dll():
         print(f"[Monitor] DLL 加载失败: {e}")
         return False
 
-
+# ---------- 数据结构 ----------
 @dataclass
 class CPUData:
     name: str = "CPU"
@@ -108,7 +114,6 @@ class CPUData:
     temperature: Optional[float] = None
     voltage: Optional[float] = None
     power: Optional[float] = None
-
 
 @dataclass
 class GPUData:
@@ -121,7 +126,6 @@ class GPUData:
     memory_used: float = 0.0
     memory_total: float = 0.0
 
-
 @dataclass
 class FPSData:
     fps: float = 0.0
@@ -129,20 +133,15 @@ class FPSData:
     fps_01low: float = 0.0
     render_latency: float = 0.0
 
-
 # ============================================================
-# DLL 传感器
+# DLL 传感器 - 兼容 Intel / AMD / NVIDIA
 # ============================================================
-
 class DLLSensorReader:
-
     def __init__(self):
         self._computer = None
         self._initialized = False
-
         if not HAS_DLL:
             return
-
         try:
             c = _Computer()
             c.IsCpuEnabled = True
@@ -194,7 +193,7 @@ class DLLSensorReader:
 
     def get_cpu_data(self) -> CPUData:
         data = CPUData()
-
+        # 使用 psutil 获取使用率和基础频率（即使 DLL 不可用也有数据）
         if HAS_PSUTIL:
             try:
                 data.usage = psutil.cpu_percent(interval=None)
@@ -215,11 +214,11 @@ class DLLSensorReader:
         except Exception:
             return data
 
+        # 获取 CPU 名称
         for (hw_type, hw_name, stype, name), value in sensors.items():
             if "Cpu" in hw_type:
                 data.name = hw_name
                 break
-
         if data.name == "CPU" and HAS_PSUTIL:
             try:
                 import platform
@@ -229,6 +228,7 @@ class DLLSensorReader:
             except Exception:
                 pass
 
+        # 温度（优先 package/tctl/tdie）
         for (hw_type, hw_name, stype, name), value in sensors.items():
             if "Cpu" in hw_type and stype == "Temperature":
                 n = name.lower()
@@ -243,6 +243,7 @@ class DLLSensorReader:
                         data.temperature = round(value, 1)
                         break
 
+        # 电压（core/vid/vcore）
         for (hw_type, hw_name, stype, name), value in sensors.items():
             if "Cpu" in hw_type and stype == "Voltage":
                 n = name.lower()
@@ -251,6 +252,7 @@ class DLLSensorReader:
                         data.voltage = round(value, 3)
                         break
 
+        # 功耗（package/cpu）
         for (hw_type, hw_name, stype, name), value in sensors.items():
             if "Cpu" in hw_type and stype == "Power":
                 n = name.lower()
@@ -265,6 +267,7 @@ class DLLSensorReader:
                         data.power = round(value, 1)
                         break
 
+        # 核心频率（区分 P/E 核）
         core_clocks = []
         for (hw_type, hw_name, stype, name), value in sensors.items():
             if "Cpu" in hw_type and stype == "Clock":
@@ -299,64 +302,104 @@ class DLLSensorReader:
     def get_gpu_data(self) -> GPUData:
         data = GPUData()
 
+        # ---------- 优先使用 NVIDIA NVML ----------
+        nvml_initialized = False
         if HAS_PYNVML:
             try:
                 import pynvml as _nvml
                 _nvml.nvmlInit()
+                nvml_initialized = True
                 h = _nvml.nvmlDeviceGetHandleByIndex(0)
+
                 name = _nvml.nvmlDeviceGetName(h)
                 if isinstance(name, bytes):
                     name = name.decode('utf-8', errors='replace')
                 data.name = name
+
                 data.usage = _nvml.nvmlDeviceGetUtilizationRates(h).gpu
                 data.frequency = _nvml.nvmlDeviceGetClockInfo(h, _nvml.NVML_CLOCK_GRAPHICS)
                 data.temperature = _nvml.nvmlDeviceGetTemperature(h, _nvml.NVML_TEMPERATURE_GPU)
                 data.power = _nvml.nvmlDeviceGetPowerUsage(h) / 1000.0
+
                 mem = _nvml.nvmlDeviceGetMemoryInfo(h)
                 data.memory_used = mem.used / (1024 * 1024)
                 data.memory_total = mem.total / (1024 * 1024)
+
                 try:
                     data.voltage = _nvml.nvmlDeviceGetVoltage(h) / 1000.0
                 except Exception:
                     pass
-                _nvml.nvmlShutdown()
 
-                if data.voltage is None and self._initialized:
+                _nvml.nvmlShutdown()
+                # 如果有电压则直接返回（否则继续走 DLL 补全电压）
+                if data.voltage is not None:
+                    return data
+            except Exception:
+                if nvml_initialized:
                     try:
-                        sensors = self.get_all_sensors()
-                        for (hw_type, hw_name, stype, name), value in sensors.items():
-                            if "Gpu" in hw_type and stype == "Voltage" and data.voltage is None:
-                                if 0 < value < 100:
-                                    data.voltage = round(value, 3)
+                        _nvml.nvmlShutdown()
                     except Exception:
                         pass
 
-                return data
-            except Exception:
-                pass
-
+        # ---------- 回退到 DLL（支持 Intel/AMD 核显/独显） ----------
         if self._initialized:
             try:
                 sensors = self.get_all_sensors()
+                gpu_name_found = None
+                temp_values = []
+                power_values = []
+                voltage_values = []
+                clock_values = []
+                load_values = []
+
                 for (hw_type, hw_name, stype, name), value in sensors.items():
                     if "Gpu" in hw_type:
-                        if data.name == "N/A":
-                            data.name = hw_name
-                        if stype == "Temperature" and data.temperature is None:
-                            if 0 < value < 200:
-                                data.temperature = round(value, 1)
-                        elif stype == "Power" and data.power is None:
-                            if 0 < value < 1000:
-                                data.power = round(value, 1)
-                        elif stype == "Voltage" and data.voltage is None:
-                            if 0 < value < 100:
-                                data.voltage = round(value, 3)
-                        elif stype == "Clock" and data.frequency == 0:
-                            if 100 < value < 5000:
-                                data.frequency = round(value, 0)
-                        elif stype == "Load" and data.usage == 0:
-                            if 0 <= value <= 100:
-                                data.usage = round(value, 1)
+                        if gpu_name_found is None:
+                            gpu_name_found = hw_name
+
+                        # 温度
+                        if stype == "Temperature" and 0 < value < 200:
+                            temp_values.append(value)
+                        # 功耗
+                        elif stype == "Power" and 0 < value < 1000:
+                            power_values.append(value)
+                        # 电压（自动识别单位）
+                        elif stype == "Voltage" or "voltage" in name.lower():
+                            if 0 < value < 2.0:
+                                voltage_values.append(value)
+                            elif 100 < value < 2000:
+                                voltage_values.append(value / 1000.0)
+                        # 频率
+                        elif stype == "Clock" and 100 < value < 5000:
+                            clock_values.append(value)
+                        # 负载
+                        elif stype == "Load" and 0 <= value <= 100:
+                            load_values.append(value)
+
+                # 若未找到电压，尝试从任何传感器中找（备选）
+                if not voltage_values:
+                    for (hw_type, hw_name, stype, name), value in sensors.items():
+                        if stype == "Voltage" or "voltage" in name.lower():
+                            if 0 < value < 2.0:
+                                voltage_values.append(value)
+                            elif 100 < value < 2000:
+                                voltage_values.append(value / 1000.0)
+                            if voltage_values:
+                                break
+
+                if gpu_name_found and data.name == "N/A":
+                    data.name = gpu_name_found
+                if temp_values:
+                    data.temperature = round(sum(temp_values) / len(temp_values), 1)
+                if power_values:
+                    data.power = round(sum(power_values) / len(power_values), 1)
+                if voltage_values:
+                    data.voltage = round(sum(voltage_values) / len(voltage_values), 3)
+                if clock_values:
+                    data.frequency = round(sum(clock_values) / len(clock_values), 0)
+                if load_values:
+                    data.usage = round(sum(load_values) / len(load_values), 1)
+
             except Exception:
                 pass
 
@@ -369,45 +412,20 @@ class DLLSensorReader:
             except Exception:
                 pass
 
-
 # ============================================================
-# FPS 监控器 - DXGI Output Duplication + GDI Fallback
-# DXGI: 直接从显示输出检测帧呈现，支持 DirectX/Vulkan 游戏
-# GDI: 作为备选方案，可能无法检测游戏帧
+# FPS 采集 - 智能选择 dxcam 或 GDI（永不报错）
 # ============================================================
-
-class DXGI_OUTDUPL_FRAME_INFO(ctypes.Structure):
-    _fields_ = [
-        ('LastPresentTime', ctypes.c_int64),
-        ('LastMouseUpdateTime', ctypes.c_int64),
-        ('AccumulatedFrames', ctypes.c_uint32),
-        ('RectsCoalesced', ctypes.c_int),
-        ('PointerShapeInfoSize', ctypes.c_uint32),
-        ('TotalMetadataBufferSize', ctypes.c_uint32),
-    ]
-
-
-DXGI_ERROR_WAIT_TIMEOUT = 0x887A0027
-DXGI_ERROR_ACCESS_LOST = 0x887A0026
-
-
-def _com_call(obj_ptr, vtbl_idx, *args):
-    func = obj_ptr.contents.vtbl[vtbl_idx]
-    return func(obj_ptr, *args)
-
-
 class FPSMonitor:
-
     def __init__(self, buffer_size: int = 3000):
-        self._frame_times: deque = deque(maxlen=buffer_size)
+        self._frame_times = deque(maxlen=buffer_size)
         self._lock = threading.Lock()
         self._running = False
-        self._thread: Optional[threading.Thread] = None
+        self._thread = None
         self._frame_count = 0
         self._method = "none"
-        self._dxgi_refs = []
         self._analyzer = FPSAnalyzer(buffer_size=5000)
-        self._last_gc_time = time.perf_counter()
+        self._camera = None
+        self._use_dxcam = False
         self._start_capture()
 
     def _start_capture(self):
@@ -416,179 +434,51 @@ class FPSMonitor:
         self._thread.start()
         print("[FPS] 采集线程已启动")
 
-    def _init_com(self):
-        try:
-            ctypes.windll.ole32.CoInitializeEx(None, 0x2)
-        except Exception:
-            pass
-
-    def _make_guid(self, s):
-        import uuid as _uuid
-        u = _uuid.UUID(s)
-
-        class GUID_S(ctypes.Structure):
-            _fields_ = [
-                ('Data1', ctypes.c_uint32),
-                ('Data2', ctypes.c_uint16),
-                ('Data3', ctypes.c_uint16),
-                ('Data4', ctypes.c_ubyte * 8),
-            ]
-
-        g = GUID_S()
-        g.Data1 = u.time_low
-        g.Data2 = u.time_mid
-        g.Data3 = u.time_hi_version
-        g.Data4 = (ctypes.c_ubyte * 8)(*u.bytes[8:])
-        return g
-
-    def _try_dxgi_duplication(self) -> bool:
-        try:
-            self._init_com()
-
-            dxgi = ctypes.WinDLL("dxgi.dll")
-            d3d11 = ctypes.WinDLL("d3d11.dll")
-
-            IID_IDXGIFactory1 = self._make_guid('770AA4C1-FD35-4DE5-A3A2-0DAAD22DB45C')
-            IID_IDXGIAdapter = self._make_guid('249EbeEE-2598-42D2-AF17-1F9068CBB1A3')
-            IID_IDXGIOutput = self._make_guid('AE02EAFB-4C39-46D0-8E26-0201E9CE6338')
-            IID_IDXGIOutput1 = self._make_guid('00CDDEA8-93C2-4DFC-A663-E2B23E100719')
-
-            pFactory = ctypes.c_void_p()
-            dxgi.CreateDXGIFactory1.restype = ctypes.c_int
-            dxgi.CreateDXGIFactory1.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-            hr = dxgi.CreateDXGIFactory1(ctypes.byref(IID_IDXGIFactory1), ctypes.byref(pFactory))
-            if hr < 0:
-                print(f"[FPS] CreateDXGIFactory1 失败: 0x{hr & 0xFFFFFFFF:08X}")
-                return False
-            self._dxgi_refs.append(pFactory)
-            print("[FPS] CreateDXGIFactory1 OK")
-
-            pAdapter = ctypes.c_void_p()
-            # IDXGIFactory1::EnumAdapters1 (vtbl index 12)
-            hr = _com_call(pFactory, 12, 0, ctypes.byref(IID_IDXGIAdapter), ctypes.byref(pAdapter))
-            if hr < 0:
-                print(f"[FPS] EnumAdapters1 失败: 0x{hr & 0xFFFFFFFF:08X}")
-                return False
-            self._dxgi_refs.append(pAdapter)
-            print("[FPS] EnumAdapters1 OK")
-
-            pOutput = ctypes.c_void_p()
-            # IDXGIAdapter::EnumOutputs (vtbl index 7)
-            hr = _com_call(pAdapter, 7, 0, ctypes.byref(IID_IDXGIOutput), ctypes.byref(pOutput))
-            if hr < 0:
-                print(f"[FPS] EnumOutputs 失败: 0x{hr & 0xFFFFFFFF:08X}")
-                return False
-            self._dxgi_refs.append(pOutput)
-            print("[FPS] EnumOutputs OK")
-
-            pOutput1 = ctypes.c_void_p()
-            # IUnknown::QueryInterface (vtbl index 0)
-            hr = _com_call(pOutput, 0, ctypes.byref(IID_IDXGIOutput1), ctypes.byref(pOutput1))
-            if hr < 0:
-                print(f"[FPS] QueryInterface IDXGIOutput1 失败: 0x{hr & 0xFFFFFFFF:08X}")
-                return False
-            self._dxgi_refs.append(pOutput1)
-            print("[FPS] IDXGIOutput1 OK")
-
-            pDevice = ctypes.c_void_p()
-            pContext = ctypes.c_void_p()
-            d3d11.D3D11CreateDevice.restype = ctypes.c_int
-            d3d11.D3D11CreateDevice.argtypes = [
-                ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint,
-                ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint,
-                ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
-            ]
-
-            feature_level = ctypes.c_uint32(0xB1000)
-            hr = d3d11.D3D11CreateDevice(
-                pAdapter, 1, None, 0,
-                ctypes.byref(feature_level), 1, 7,
-                ctypes.byref(pDevice), None, ctypes.byref(pContext),
-            )
-            if hr < 0:
-                print(f"[FPS] D3D11CreateDevice 失败: 0x{hr & 0xFFFFFFFF:08X}")
-                return False
-            self._dxgi_refs.append(pDevice)
-            if pContext:
-                self._dxgi_refs.append(pContext)
-            print("[FPS] D3D11CreateDevice OK")
-
-            pDuplication = ctypes.c_void_p()
-            # IDXGIOutput1::DuplicateOutput (vtbl index 19)
-            hr = _com_call(pOutput1, 19, pDevice, ctypes.byref(pDuplication))
-            if hr < 0:
-                print(f"[FPS] DuplicateOutput 失败: 0x{hr & 0xFFFFFFFF:08X}")
-                return False
-            self._dxgi_refs.append(pDuplication)
-            print("[FPS] DuplicateOutput OK")
-
-            self._pDuplication = pDuplication
-            self._method = "dxgi"
-            return True
-
-        except Exception as e:
-            print(f"[FPS] DXGI 初始化异常: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-
     def _capture_loop(self):
-        fail_streak = 0
-        max_fail_streak = 5
-        last_health_check = time.perf_counter()
-        health_check_interval = 60.0
-        
-        while self._running:
-            if self._try_dxgi_duplication():
-                print("[FPS] 使用 DXGI Desktop Duplication 方式")
-                self._method = "dxgi"
-                self._capture_dxgi()
-                break
-            else:
-                print("[FPS] DXGI 不可用，回退到 GDI BitBlt（无法检测 DirectX/Vulkan 游戏帧）")
-                self._method = "gdi"
-                self._capture_gdi()
-                break
-                
-    def _capture_dxgi(self):
-        pDup = self._pDuplication
-        fail_count = 0
+        # ---------- 尝试 dxcam（如果已安装） ----------
+        if HAS_DXCAM:
+            try:
+                self._camera = dxcam.create(output_idx=0, output_color="BGR")
+                # 等待最多 1.5 秒尝试获取一帧以验证可用性
+                print("[FPS] dxcam 预热中...")
+                start_wait = time.perf_counter()
+                frame = None
+                while time.perf_counter() - start_wait < 1.5 and self._running:
+                    frame = self._camera.get_latest_frame()
+                    if frame is not None:
+                        break
+                    time.sleep(0.01)
+                if frame is not None:
+                    self._use_dxcam = True
+                    self._method = "dxcam"
+                    print("[FPS] dxcam (DXGI) 捕获成功")
+                    self._capture_dxcam()
+                    return
+                else:
+                    print("[FPS] dxcam 未捕获到帧，回退 GDI")
+            except Exception as e:
+                print(f"[FPS] dxcam 不可用 ({e})，回退 GDI")
+                self._camera = None
+
+        # ---------- 回退到 GDI（稳定且兼容所有系统） ----------
+        print("[FPS] 使用 GDI BitBlt 模式")
+        self._method = "gdi"
+        self._capture_gdi()
+
+    # ---------- dxcam 采集 ----------
+    def _capture_dxcam(self):
         last_time = 0.0
-        last_cleanup = time.perf_counter()
-        cleanup_interval = 30.0
-        
+        self._last_cleanup = time.perf_counter()
         while self._running:
-            health_time = time.perf_counter()
-            if health_time - last_health_check > health_check_interval:
-                if len(self._frame_times) > self._frame_times.maxlen * 0.9:
-                    print("[FPS] DXGI 缓冲区接近满，将清理旧数据")
-                    with self._lock:
-                        for _ in range(min(100, len(self._frame_times) - self._frame_times.maxlen // 4)):
-                            self._frame_times.popleft()
-                last_health_check = health_time
-
-            pFrameInfo = DXGI_OUTDUPL_FRAME_INFO()
-            pResource = ctypes.c_void_p()
-
-            hr = _com_call(pDup, 10, 100, ctypes.byref(pFrameInfo), ctypes.byref(pResource))
-
-            if hr == DXGI_ERROR_WAIT_TIMEOUT:
-                continue
-            elif hr == DXGI_ERROR_ACCESS_LOST:
-                print("[FPS] DXGI ACCESS_LOST，准备重连")
-                self.cleanup()
-                self._start_capture()
-                return
-            elif hr < 0:
-                fail_count += 1
-                if fail_count <= 3:
-                    print(f"[FPS] AcquireNextFrame: 0x{hr & 0xFFFFFFFF:08X}")
-                time.sleep(0.01)
+            try:
+                frame = self._camera.get_latest_frame()
+            except Exception:
+                frame = None
+            if frame is None:
+                time.sleep(0.001)
                 continue
 
-            _com_call(pDup, 12)
             current_time = time.perf_counter()
-
             if last_time > 0:
                 ft = (current_time - last_time) * 1000.0
                 if 1.0 < ft < 2000.0:
@@ -597,17 +487,28 @@ class FPSMonitor:
                         self._frame_count += 1
                     self._analyzer.push_frame(ft)
             last_time = current_time
-            fail_count = 0
-            
-            cleanup_time = time.perf_counter()
-            if cleanup_time - last_cleanup > cleanup_interval:
-                now = time.perf_counter()
+
+            # 定期清理
+            if time.perf_counter() - self._last_cleanup > 30.0:
                 with self._lock:
-                    self._frame_times = deque([(t, ft) for t, ft in self._frame_times if t > now - 5.0], maxlen=self._frame_times.maxlen)
-                last_cleanup = cleanup_time
+                    now = time.perf_counter()
+                    self._frame_times = deque(
+                        [(t, ft) for t, ft in self._frame_times if t > now - 5.0],
+                        maxlen=self._frame_times.maxlen
+                    )
+                self._last_cleanup = time.perf_counter()
 
-        print("[FPS] DXGI 采集线程退出")
+            time.sleep(0.001)
 
+        if self._camera:
+            try:
+                self._camera.stop()
+            except Exception:
+                pass
+            self._camera = None
+        print("[FPS] dxcam 采集线程退出")
+
+    # ---------- GDI 采集（优化版） ----------
     def _capture_gdi(self):
         try:
             ctypes.windll.user32.SetProcessDPIAware()
@@ -616,7 +517,7 @@ class FPSMonitor:
 
         sw = user32.GetSystemMetrics(0)
         sh = user32.GetSystemMetrics(1)
-        w, h = 64, 64
+        w, h = 256, 256
         cx = (sw - w) // 2
         cy = (sh - h) // 2
         print(f"[FPS] GDI 采集区域: ({cx},{cy}) {w}x{h}  屏幕: {sw}x{sh}")
@@ -625,14 +526,12 @@ class FPSMonitor:
         if not hdc_screen:
             print("[FPS] GetDC(0) 失败")
             return
-
         hdc_mem = gdi32.CreateCompatibleDC(hdc_screen)
         hbitmap = gdi32.CreateCompatibleBitmap(hdc_screen, w, h)
         if not hbitmap:
             gdi32.DeleteDC(hdc_mem)
             user32.ReleaseDC(0, hdc_screen)
             return
-
         old_bmp = gdi32.SelectObject(hdc_mem, hbitmap)
 
         bmi = BITMAPINFO()
@@ -645,26 +544,21 @@ class FPSMonitor:
 
         buf_size = w * h * 4
         buf = (ctypes.c_ubyte * buf_size)()
-
         last_hash = None
         last_time = 0.0
-        fail_count = 0
         sample_count = 0
         change_count = 0
-        last_cleanup = time.perf_counter()
-        cleanup_interval = 30.0
 
         while self._running:
-            ok = gdi32.BitBlt(hdc_mem, 0, 0, w, h, hdc_screen, cx, cy, SRCCOPY)
-            if not ok:
-                fail_count += 1
-                time.sleep(0.01)
-                continue
-
-            ret = gdi32.GetDIBits(hdc_mem, hbitmap, 0, h, ctypes.byref(buf), ctypes.byref(bmi), DIB_RGB_COLORS)
-            if ret == 0:
-                fail_count += 1
-                time.sleep(0.01)
+            try:
+                if not gdi32.BitBlt(hdc_mem, 0, 0, w, h, hdc_screen, cx, cy, SRCCOPY):
+                    time.sleep(0.001)
+                    continue
+                if not gdi32.GetDIBits(hdc_mem, hbitmap, 0, h, ctypes.byref(buf), ctypes.byref(bmi), DIB_RGB_COLORS):
+                    time.sleep(0.001)
+                    continue
+            except Exception:
+                time.sleep(0.001)
                 continue
 
             sample_count += 1
@@ -675,27 +569,21 @@ class FPSMonitor:
                 change_count += 1
                 if last_time > 0:
                     ft = (current_time - last_time) * 1000.0
-                    if 2.0 < ft < 2000.0:
+                    if 1.0 < ft < 2000.0:
                         with self._lock:
                             self._frame_times.append((current_time, ft))
                             self._frame_count += 1
                         self._analyzer.push_frame(ft)
                 last_time = current_time
 
-            if sample_count == 200:
-                print(f"[FPS] GDI 诊断: 采样={sample_count} 变化={change_count} 帧数={self._frame_count}")
+            if sample_count == 100:
+                if change_count > 0:
+                    print(f"[FPS] GDI 诊断: 采样={sample_count} 变化={change_count} 帧数={self._frame_count}")
                 sample_count = 0
                 change_count = 0
 
             last_hash = current_hash
-            time.sleep(0.002)
-            
-            cleanup_time = time.perf_counter()
-            if cleanup_time - last_cleanup > cleanup_interval:
-                now = time.perf_counter()
-                with self._lock:
-                    self._frame_times = deque([(t, ft) for t, ft in self._frame_times if t > now - 5.0], maxlen=self._frame_times.maxlen)
-                last_cleanup = cleanup_time
+            time.sleep(0.001)
 
         gdi32.SelectObject(hdc_mem, old_bmp)
         gdi32.DeleteObject(hbitmap)
@@ -703,167 +591,76 @@ class FPSMonitor:
         user32.ReleaseDC(0, hdc_screen)
         print("[FPS] GDI 采集线程退出")
 
-    def _capture_dxgi(self):
-        pDup = self._pDuplication
-        fail_count = 0
-        last_time = 0.0
-
-        while self._running:
-            pFrameInfo = DXGI_OUTDUPL_FRAME_INFO()
-            pResource = ctypes.c_void_p()
-
-            # IDXGIOutputDuplication::AcquireNextFrame (vtbl index 10)
-            hr = _com_call(pDup, 10, 100, ctypes.byref(pFrameInfo), ctypes.byref(pResource))
-
-            if hr == DXGI_ERROR_WAIT_TIMEOUT:
-                continue
-            elif hr == DXGI_ERROR_ACCESS_LOST:
-                print("[FPS] DXGI ACCESS_LOST")
-                break
-            elif hr < 0:
-                fail_count += 1
-                if fail_count <= 3:
-                    print(f"[FPS] AcquireNextFrame: 0x{hr & 0xFFFFFFFF:08X}")
-                time.sleep(0.01)
-                continue
-
-            # IDXGIOutputDuplication::ReleaseFrame (vtbl index 12)
-            _com_call(pDup, 12)
-            current_time = time.perf_counter()
-
-            if last_time > 0:
-                ft = (current_time - last_time) * 1000.0
-                if 1.0 < ft < 2000.0:
-                    with self._lock:
-                        self._frame_times.append((current_time, ft))
-                        self._frame_count += 1
-                    self._analyzer.push_frame(ft)
-            last_time = current_time
-            fail_count = 0
-
-        print("[FPS] DXGI 采集线程退出")
-
-    def _capture_gdi(self):
-        try:
-            ctypes.windll.user32.SetProcessDPIAware()
-        except Exception:
-            pass
-
-        sw = user32.GetSystemMetrics(0)
-        sh = user32.GetSystemMetrics(1)
-        w, h = 64, 64
-        cx = (sw - w) // 2
-        cy = (sh - h) // 2
-        print(f"[FPS] GDI 采集区域: ({cx},{cy}) {w}x{h}  屏幕: {sw}x{sh}")
-
-        hdc_screen = user32.GetDC(0)
-        if not hdc_screen:
-            print("[FPS] GetDC(0) 失败")
-            return
-
-        hdc_mem = gdi32.CreateCompatibleDC(hdc_screen)
-        hbitmap = gdi32.CreateCompatibleBitmap(hdc_screen, w, h)
-        if not hbitmap:
-            gdi32.DeleteDC(hdc_mem)
-            user32.ReleaseDC(0, hdc_screen)
-            return
-
-        old_bmp = gdi32.SelectObject(hdc_mem, hbitmap)
-
-        bmi = BITMAPINFO()
-        bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
-        bmi.bmiHeader.biWidth = w
-        bmi.bmiHeader.biHeight = -h
-        bmi.bmiHeader.biPlanes = 1
-        bmi.bmiHeader.biBitCount = 32
-        bmi.bmiHeader.biCompression = BI_RGB
-
-        buf_size = w * h * 4
-        buf = (ctypes.c_ubyte * buf_size)()
-
-        last_hash = None
-        last_time = 0.0
-        fail_count = 0
-        sample_count = 0
-        change_count = 0
-
-        while self._running:
-            ok = gdi32.BitBlt(hdc_mem, 0, 0, w, h, hdc_screen, cx, cy, SRCCOPY)
-            if not ok:
-                fail_count += 1
-                time.sleep(0.01)
-                continue
-
-            ret = gdi32.GetDIBits(hdc_mem, hbitmap, 0, h, ctypes.byref(buf), ctypes.byref(bmi), DIB_RGB_COLORS)
-            if ret == 0:
-                fail_count += 1
-                time.sleep(0.01)
-                continue
-
-            sample_count += 1
-            current_hash = hash(bytes(buf))
-            current_time = time.perf_counter()
-
-            if last_hash is not None and current_hash != last_hash:
-                change_count += 1
-                if last_time > 0:
-                    ft = (current_time - last_time) * 1000.0
-                    if 2.0 < ft < 2000.0:
-                        with self._lock:
-                            self._frame_times.append((current_time, ft))
-                            self._frame_count += 1
-                        self._analyzer.push_frame(ft)
-                last_time = current_time
-
-            if sample_count == 200:
-                print(f"[FPS] GDI 诊断: 采样={sample_count} 变化={change_count} 帧数={self._frame_count}")
-                sample_count = 0
-                change_count = 0
-
-            last_hash = current_hash
-            time.sleep(0.002)
-
-        gdi32.SelectObject(hdc_mem, old_bmp)
-        gdi32.DeleteObject(hbitmap)
-        gdi32.DeleteDC(hdc_mem)
-        user32.ReleaseDC(0, hdc_screen)
-        print("[FPS] GDI 采集线程退出")
-
+    # ---------- 统计计算 ----------
     def update(self) -> FPSData:
-        stats = self._analyzer.get_stats(min_frames=2)
-        if stats.frame_count < 2:
-            return FPSData(fps=0.0, fps_1low=0.0, fps_01low=0.0, render_latency=0.0)
+        now = time.perf_counter()
+        with self._lock:
+            items = list(self._frame_times)
 
-        recent = list(self._frame_times)[-120:]
-        avg = sum(d for _, d in recent) / len(recent) if recent else 0.0
+        window_10s = [ft for t, ft in items if now - t <= 10.0]
+        window_300ms = [ft for t, ft in items if now - t <= 0.3]
+
+        # 瞬时 FPS
+        if len(window_300ms) >= 2:
+            avg = sum(window_300ms) / len(window_300ms)
+            std = (sum((x - avg) ** 2 for x in window_300ms) / len(window_300ms)) ** 0.5
+            filtered = [x for x in window_300ms if abs(x - avg) <= 3 * std + 1.0]
+            if filtered:
+                final_avg = sum(filtered) / len(filtered)
+                instant_fps = 1000.0 / final_avg if final_avg > 0 else 0.0
+                render_latency = final_avg
+            else:
+                instant_fps = 1000.0 / avg if avg > 0 else 0.0
+                render_latency = avg
+        elif len(window_300ms) == 1:
+            instant_fps = 1000.0 / window_300ms[0] if window_300ms[0] > 0 else 0.0
+            render_latency = window_300ms[0]
+        else:
+            if len(window_10s) >= 2:
+                avg = sum(window_10s) / len(window_10s)
+                instant_fps = 1000.0 / avg if avg > 0 else 0.0
+                render_latency = avg
+            else:
+                instant_fps = 0.0
+                render_latency = 0.0
+
+        # 1% Low & 0.1% Low
+        if len(window_10s) >= 10:
+            sorted_fts = sorted(window_10s, reverse=True)
+            n = len(sorted_fts)
+            count_1 = max(1, int(n * 0.01))
+            avg_worst_1 = sum(sorted_fts[:count_1]) / count_1
+            fps_1low = 1000.0 / avg_worst_1 if avg_worst_1 > 0 else 0.0
+
+            count_01 = max(1, int(n * 0.001))
+            avg_worst_01 = sum(sorted_fts[:count_01]) / count_01
+            fps_01low = 1000.0 / avg_worst_01 if avg_worst_01 > 0 else 0.0
+        else:
+            fps_1low = 0.0
+            fps_01low = 0.0
 
         return FPSData(
-            fps=stats.avg_fps,
-            # fps_1low=stats.fps_1low,
-
-            fps_1low=stats.fps_1low * 1.6,
-            fps_01low=stats.fps_01low,
-            render_latency=avg,
+            fps=instant_fps,
+            fps_1low=fps_1low,
+            fps_01low=fps_01low,
+            render_latency=render_latency,
         )
 
     def cleanup(self):
         self._running = False
         if self._thread:
             self._thread.join(timeout=3)
-        for ref in reversed(self._dxgi_refs):
+        if self._camera:
             try:
-                _com_call(ref, 2)
+                self._camera.stop()
             except Exception:
                 pass
-        self._dxgi_refs.clear()
-        try:
-            ctypes.windll.ole32.CoUninitialize()
-        except Exception:
-            pass
+            self._camera = None
 
-
+# ============================================================
+# 主控制器
+# ============================================================
 class HardwareMonitor:
-
     def __init__(self):
         print("[Monitor] 初始化中...")
         _init_dll()
@@ -891,18 +688,21 @@ class HardwareMonitor:
         return cpu, gpu, fps
 
     def cleanup(self):
-        self._reader.cleanup()
-        self.fps.cleanup()
-
+        try:
+            self._reader.cleanup()
+        except Exception:
+            pass
+        try:
+            self.fps.cleanup()
+        except Exception:
+            pass
 
 class DataWorker:
-    """后台数据采集线程，避免阻塞 UI 主线程"""
-
     def __init__(self, monitor: HardwareMonitor, interval_ms: int = 1000):
         self._monitor = monitor
         self._interval = interval_ms / 1000.0
         self._running = False
-        self._thread: Optional[threading.Thread] = None
+        self._thread = None
         self._lock = threading.Lock()
         self._cpu = CPUData()
         self._gpu = GPUData()
