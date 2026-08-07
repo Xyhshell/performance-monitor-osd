@@ -1,4 +1,4 @@
-# Performance Monitor OSD - 版本更新说明
+# 8/07 Performance Monitor OSD V1.2 版本更新说明  
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/)
@@ -6,7 +6,17 @@
 
 ![OSD 预览](IMG/1.png) ![实测](IMG/2.png)
 
-### 🚀 新增功能
+---
+## V1.2 在v1.1 的基础上
+- 增加对多GPU选择的支持，多显卡可以自选需要显示的GPU  
+- 支持仅在游戏（显卡工作且获取到帧数流）时显示OSD窗口，其余时刻隐藏，不干扰显示画面
+- 支持全标签字段自定义显示内容及显示配置文件位置，便于查找配置文件（请勿自行编辑，字段错误时会重置所有设置）
+
+## 提示
+- 需要较新的windows系统且需支持 .net8
+---
+
+### 🚀 V1.1 新增功能
 
 - **CPU 频率增强显示**：支持显示所有核心的平均频率，以及 Intel 大小核架构的 P-Core 和 E-Core 平均频率（自动识别并分别显示）
 - **双布局模式**：新增横向布局，与原有纵向布局自由切换，适应不同屏幕空间和用户习惯
@@ -46,7 +56,7 @@
 **此次更新旨在提供更准确、更灵活的监控体验，同时提升稳定性和易用性。** 感谢您的使用与反馈！
 ---
 
-**版本**：1.1   
-**发布日期**：2026-07-28  ->  2026-08-06  
+**版本**：1.2  
+**发布日期**：2026-07-28  ->  2026-08-07   
 **作者**：[jingmo](https://github.com/Xyhshell)  
 **项目地址**：[GitHub](https://github.com/Xyhshell/performance-monitor-osd)
