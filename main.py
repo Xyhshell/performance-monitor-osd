@@ -5,7 +5,7 @@ import logging
 import argparse
 import atexit
 import config
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication, QSystemTrayIcon
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtGui import QIcon
 from ui import OSDWindow, SettingsDialog, SystemTray
@@ -133,7 +133,7 @@ def main():
     logger.info("Performance Monitor OSD 启动")
     logger.debug(f"命令行参数: {sys.argv}")
 
-    # ---------- 新增：确保配置文件存在 ----------
+    # ---------- 确保配置文件存在 ----------
     from settings import get_config_path
     config_path = get_config_path()
     logger.info(f"配置文件路径: {config_path}")
@@ -151,10 +151,23 @@ def main():
         settings = Settings()
 
     app = QApplication(sys.argv)
+    # 关键修复：禁止在没有可见窗口时自动退出
+    app.setQuitOnLastWindowClosed(False)
     app.setWindowIcon(QIcon.fromTheme("utilities-system-monitor", QIcon()))
 
     osd = OSDWindow(settings)
     tray = SystemTray()
+
+    # 当 OSD 因同步而自动隐藏时，弹出托盘通知
+    osd.osd_hidden_by_sync.connect(
+        lambda: tray.showMessage(
+            "OSD 已隐藏",
+            "FPS 未检测到，OSD 已自动隐藏。\n可通过托盘菜单重新显示。",
+            QSystemTrayIcon.Information,
+            3000
+        )
+    )
+
     monitor_thread = MonitorThread(settings.window.update_interval, logger=logger)
     monitor_thread.data_updated.connect(osd.update_data)
     monitor_thread.start()
@@ -178,9 +191,7 @@ def main():
         monitor_thread.interval = settings.window.update_interval
 
     def show_settings():
-        # 获取所有 GPU 数据
         gpu_data_list = monitor_thread.hw_monitor.get_all_gpu_data()
-        # 提取名称和有效性
         gpu_names = []
         gpu_valid = []
         for gpu in gpu_data_list:

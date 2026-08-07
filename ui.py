@@ -5,6 +5,7 @@ ui.py - 用户界面（完整版）
 标签为空时自动跳过该行（后续行上移）
 删除了 GPU 自定义名称和“全部”模式，删除了 P/E 核心显示
 添加配置文件路径显示
+修复了因同步隐藏导致程序退出的问题（通过信号通知+主程序设置 quitOnLastWindowClosed=False）
 """
 from typing import Optional, Dict, Any, List
 from PyQt5.QtWidgets import (
@@ -57,6 +58,7 @@ class ModuleLayout:
 
 class OSDWindow(QWidget):
     settings_requested = pyqtSignal()
+    osd_hidden_by_sync = pyqtSignal()   # 当因同步而隐藏时发射
 
     def __init__(self, settings: Settings, parent=None):
         super().__init__(parent)
@@ -816,6 +818,9 @@ class OSDWindow(QWidget):
                 self.show()
                 self._hidden_by_sync = False
             elif not current_fps_available and self.isVisible():
+                # 发送信号通知主程序弹出托盘消息（仅在状态切换时发送一次）
+                if not self._hidden_by_sync:
+                    self.osd_hidden_by_sync.emit()
                 self.hide()
                 self._hidden_by_sync = True
         else:
@@ -918,7 +923,7 @@ class SettingsDialog(QDialog):
         self._build_tab_layout()
         self._build_tab_about()
 
-        btn_close = QPushButton("保存并关闭")   # 修改点：明确为保存并关闭，避免用户误解为退出程序
+        btn_close = QPushButton("保存并关闭")
         btn_close.setMinimumHeight(26)
         btn_close.setMinimumWidth(80)
         btn_close.clicked.connect(self.close)
@@ -1402,9 +1407,16 @@ class SettingsDialog(QDialog):
         self.hide_fps_below_60.stateChanged.connect(self._apply_display)
         self.sync_osd_with_fps = QCheckBox("FPS 显示时自动显示整个 OSD")
         self.sync_osd_with_fps.stateChanged.connect(self._apply_display)
+        lfps.addWidget(self.sync_osd_with_fps)
+        # 提示标签
+        tip_label = QLabel("启用后，无 FPS 时 OSD 自动隐藏，可通过托盘菜单手动显示/隐藏")
+        tip_label.setWordWrap(True)
+        tip_label.setStyleSheet("color: #888; font-size: 10px; padding-left: 20px;")
+        lfps.addWidget(tip_label)
+
         for cb in [self.show_fps, self.show_fps_header, self.show_fps_1low,
-                   self.show_fps_latency, self.hide_fps_below_60, self.sync_osd_with_fps]:
-            lfps.addWidget(cb)
+                   self.show_fps_latency, self.hide_fps_below_60]:
+            lfps.addWidget(cb)  # sync_osd_with_fps 已单独添加，避免重复
         g_show.setLayout(lfps)
         lay.addWidget(g_show)
 
@@ -1467,7 +1479,7 @@ class SettingsDialog(QDialog):
             <p style="margin-top: 0; color: #D0D0D0;">
                 一款专为游戏玩家和性能发烧友设计的实时硬件监控工具，以透明悬浮窗形式显示 CPU、GPU、网络及 FPS 关键指标。
                 支持双布局、模块顺序调整、智能隐藏，所有标签和颜色可自定义，不干扰您的游戏或工作。
-                <li><b>开源地址：</b> &mdash;> <a href="https://github.com/Xyhshell/performance-monitor-osd" style="color: #4A9EFF; text-decoration: none;">GitHub</a></li>
+            <li><b>开源地址：</b> &mdash;> <a href="https://github.com/Xyhshell/performance-monitor-osd" style="color: #4A9EFF; text-decoration: none;">GitHub</a></li>
             </p>
 
             <h3 style="color: #FFD700; margin-bottom: 4px;">✨ 主要特性</h3>
