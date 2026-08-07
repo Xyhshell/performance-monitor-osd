@@ -1,3 +1,4 @@
+# ========== fps_monitor.py ==========
 """
 fps_monitor.py - 独立 PresentMon FPS 采集器（增强版）
 - 自动重启机制
@@ -24,7 +25,7 @@ class FPSMonitor:
         self._last_frame_time = 0.0
         self._lock = threading.Lock()
         self._restart_count = 0
-        self._max_restarts = 3  # 最大重启次数，防止无限循环
+        self._max_restarts = 3
 
     @staticmethod
     def _find_executable(explicit_path: Optional[str]) -> Optional[str]:
@@ -42,12 +43,10 @@ class FPSMonitor:
         return None
 
     def open(self) -> bool:
-        """启动 PresentMon 进程，返回是否成功"""
         if not self.exe_path:
             print("[FPSMonitor] 错误: PresentMon.exe 未找到")
             return False
         if self._process is not None and self._process.poll() is None:
-            # 进程已在运行
             return True
 
         cmd = [
@@ -74,11 +73,10 @@ class FPSMonitor:
             return False
 
     def close(self):
-        """终止 PresentMon 进程并清理资源"""
         self._running = False
         if self._process:
             try:
-                if self._process.poll() is None:  # 进程还在运行
+                if self._process.poll() is None:
                     self._process.terminate()
                     self._process.wait(timeout=3)
                     print("[FPSMonitor] PresentMon 已终止")
@@ -91,19 +89,16 @@ class FPSMonitor:
                     pass
                 print(f"[FPSMonitor] 强制结束进程: {e}")
             self._process = None
-        # 等待读取线程结束（最多1秒）
         if self._reader_thread and self._reader_thread.is_alive():
             self._reader_thread.join(timeout=1)
         self._reader_thread = None
 
     def is_running(self) -> bool:
-        """检查 PresentMon 进程是否仍在运行"""
         if self._process is None:
             return False
         return self._process.poll() is None
 
     def restart(self) -> bool:
-        """重启 PresentMon"""
         print("[FPSMonitor] 尝试重启 PresentMon...")
         self.close()
         time.sleep(0.5)
@@ -145,17 +140,14 @@ class FPSMonitor:
 
     def get_fps_info(self) -> Dict[str, Any]:
         with self._lock:
-            # 检查进程是否还在，若不在则尝试重启
             if not self.is_running() and self._running:
                 print("[FPSMonitor] PresentMon 进程意外退出，尝试重启")
                 self.restart()
 
-            # 如果 5 秒没有新帧，且进程还在，可能游戏未运行或过滤问题，尝试重启
             if self.is_running() and time.time() - self._last_frame_time > 5.0 and len(self._frametimes) > 0:
                 print("[FPSMonitor] 长时间无新帧，尝试重启 PresentMon")
                 self.restart()
 
-            # 清除超时数据（3秒无帧视为游戏停止）
             if time.time() - self._last_frame_time > 3.0:
                 self._frametimes.clear()
                 self._last_app = ""

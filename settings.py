@@ -1,11 +1,11 @@
 import json
 import os
 import sys
-from dataclasses import dataclass, field, asdict
+import dataclasses
+from dataclasses import dataclass, field, asdict, MISSING
 from typing import Optional, Dict, Any, List
 
 DEFAULT_CONFIG_FILENAME = "settings.json"
-
 
 def get_config_path() -> str:
     if getattr(sys, 'frozen', False):
@@ -13,7 +13,6 @@ def get_config_path() -> str:
     else:
         base_dir = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base_dir, DEFAULT_CONFIG_FILENAME)
-
 
 THEME_PRESETS: Dict[str, Dict[str, str]] = {
     "赛博朋克": {
@@ -29,14 +28,12 @@ THEME_PRESETS: Dict[str, Dict[str, str]] = {
 }
 THEME_NAMES = list(THEME_PRESETS.keys())
 
-
 @dataclass
 class FontSettings:
     family: str = "Microsoft YaHei"
     size: int = 18
     bold: bool = False
     weight: int = 75
-
 
 @dataclass
 class ColorSettings:
@@ -65,6 +62,32 @@ class ColorSettings:
     net_upload: str = "#69F0AE"
     net_download: str = "#FFAB40"
 
+@dataclass
+class LabelSettings:
+    cpu_title: str = "CPU"
+    gpu_title: str = "GPU"
+    net_title: str = "网络"
+    fps_title: str = "FPS"
+
+    cpu_usage: str = "占用率"
+    cpu_freq: str = "频率"
+    cpu_freq_avg: str = "频率(avg)"
+    cpu_temp: str = "温度"
+    cpu_voltage: str = "电压"
+    cpu_power: str = "功耗"
+
+    gpu_usage: str = "占用率"
+    gpu_freq: str = "频率"
+    gpu_temp: str = "温度"
+    gpu_voltage: str = "电压"
+    gpu_power: str = "功耗"
+    gpu_memory: str = "显存"
+
+    net_upload: str = "上行"
+    net_download: str = "下行"
+
+    fps_1low: str = "1%Low"
+    fps_latency: str = "帧时间"
 
 @dataclass
 class DisplaySettings:
@@ -95,7 +118,10 @@ class DisplaySettings:
     show_fps_1low: bool = True
     show_fps_latency: bool = True
     hide_fps_below_60: bool = False
+    sync_osd_with_fps: bool = False
 
+    gpu_selection_mode: str = "auto"   # "auto" 或 "custom"
+    selected_gpu_indices: List[int] = field(default_factory=list)
 
 @dataclass
 class ShadowSettings:
@@ -104,7 +130,6 @@ class ShadowSettings:
     offset_x: int = 1
     offset_y: int = 1
     opacity: int = 30
-
 
 @dataclass
 class WindowSettings:
@@ -118,12 +143,6 @@ class WindowSettings:
     layout_mode: str = "vertical"
     module_order: List[str] = field(default_factory=lambda: ["CPU", "GPU", "Net", "FPS"])
 
-
-@dataclass
-class GPUCustomSettings:
-    custom_name: str = ""
-
-
 @dataclass
 class Settings:
     font: FontSettings = field(default_factory=FontSettings)
@@ -131,7 +150,7 @@ class Settings:
     display: DisplaySettings = field(default_factory=DisplaySettings)
     window: WindowSettings = field(default_factory=WindowSettings)
     shadow: ShadowSettings = field(default_factory=ShadowSettings)
-    gpu_custom: GPUCustomSettings = field(default_factory=GPUCustomSettings)
+    labels: LabelSettings = field(default_factory=LabelSettings)
     theme_name: str = "赛博朋克"
 
     def apply_theme(self, name: str):
@@ -173,6 +192,7 @@ class Settings:
 
     @classmethod
     def _from_dict(cls, data: Dict[str, Any]) -> 'Settings':
+        # ---------- 字体 ----------
         fd = data.get('font', {})
         font = FontSettings(
             family=fd.get('family', FontSettings.family),
@@ -180,16 +200,45 @@ class Settings:
             bold=fd.get('bold', FontSettings.bold),
             weight=fd.get('weight', FontSettings.weight),
         )
+
+        # ---------- 颜色 ----------
         cd = data.get('colors', {})
-        colors_defaults = {k: getattr(ColorSettings, k) for k in ColorSettings.__dataclass_fields__}
-        colors = ColorSettings(**{k: cd.get(k, colors_defaults[k]) for k in colors_defaults})
+        # 使用类字段默认值作为后备
+        color_fields = ColorSettings.__dataclass_fields__
+        color_kwargs = {}
+        for fname, fdef in color_fields.items():
+            if fname in cd:
+                color_kwargs[fname] = cd[fname]
+            else:
+                if fdef.default is not MISSING:
+                    color_kwargs[fname] = fdef.default
+                elif fdef.default_factory is not MISSING:
+                    color_kwargs[fname] = fdef.default_factory()
+                else:
+                    color_kwargs[fname] = None
+        colors = ColorSettings(**color_kwargs)
 
+        # ---------- 显示 ----------
         dd = data.get('display', {})
-        display_defaults = {k: getattr(DisplaySettings, k) for k in DisplaySettings.__dataclass_fields__}
-        display = DisplaySettings(**{k: dd.get(k, display_defaults[k]) for k in display_defaults})
+        display_fields = DisplaySettings.__dataclass_fields__
+        display_kwargs = {}
+        for fname, fdef in display_fields.items():
+            if fname in dd:
+                display_kwargs[fname] = dd[fname]
+            else:
+                if fdef.default is not MISSING:
+                    display_kwargs[fname] = fdef.default
+                elif fdef.default_factory is not MISSING:
+                    display_kwargs[fname] = fdef.default_factory()
+                else:
+                    display_kwargs[fname] = None
+        # 兼容旧版本：将 "all" 转为 "auto"
+        if display_kwargs.get('gpu_selection_mode') == 'all':
+            display_kwargs['gpu_selection_mode'] = 'auto'
+        display = DisplaySettings(**display_kwargs)
 
+        # ---------- 窗口 ----------
         wd = data.get('window', {})
-        # 修正：使用显式默认列表，避免引用 dataclass field
         window = WindowSettings(
             x=wd.get('x', WindowSettings.x),
             y=wd.get('y', WindowSettings.y),
@@ -199,10 +248,10 @@ class Settings:
             background_opacity=wd.get('background_opacity', WindowSettings.background_opacity),
             pinned=wd.get('pinned', WindowSettings.pinned),
             layout_mode=wd.get('layout_mode', WindowSettings.layout_mode),
-            module_order=wd.get('module_order', ["CPU", "GPU", "Net", "FPS"])  # 直接写默认列表
+            module_order=wd.get('module_order', ["CPU", "GPU", "Net", "FPS"])
         )
-        gd = data.get('gpu_custom', {})
-        gpu_custom = GPUCustomSettings(custom_name=gd.get('custom_name', GPUCustomSettings.custom_name))
+
+        # ---------- 阴影 ----------
         sd = data.get('shadow', {})
         shadow = ShadowSettings(
             enabled=sd.get('enabled', ShadowSettings.enabled),
@@ -211,7 +260,31 @@ class Settings:
             offset_y=sd.get('offset_y', ShadowSettings.offset_y),
             opacity=sd.get('opacity', ShadowSettings.opacity),
         )
+
+        # ---------- 标签 ----------
+        ld = data.get('labels', {})
+        label_fields = LabelSettings.__dataclass_fields__
+        label_kwargs = {}
+        for fname, fdef in label_fields.items():
+            if fname in ld:
+                label_kwargs[fname] = ld[fname]
+            else:
+                if fdef.default is not MISSING:
+                    label_kwargs[fname] = fdef.default
+                elif fdef.default_factory is not MISSING:
+                    label_kwargs[fname] = fdef.default_factory()
+                else:
+                    label_kwargs[fname] = None
+        labels = LabelSettings(**label_kwargs)
+
         theme_name = data.get('theme_name', Settings.theme_name)
-        return cls(font=font, colors=colors, display=display,
-                   window=window, gpu_custom=gpu_custom,
-                   shadow=shadow, theme_name=theme_name)
+
+        return cls(
+            font=font,
+            colors=colors,
+            display=display,
+            window=window,
+            shadow=shadow,
+            labels=labels,
+            theme_name=theme_name
+        )

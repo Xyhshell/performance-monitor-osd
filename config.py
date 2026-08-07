@@ -15,7 +15,6 @@ def _load_dll():
         import clr
         clr.AddReference(str(dll_path))
         from LibreHardwareMonitor.Hardware import Computer
-        # 将 Computer 类暴露到全局（可选）
         global Computer
         Computer = Computer
         print("[Config] .NET 运行时库加载成功")
@@ -26,9 +25,7 @@ def _load_dll():
         print(f"[Config] 错误: {e}")
         sys.exit(1)
 
-# 模块导入时自动执行加载
 _load_dll()
 
-# 如果需要，保留 setup_environment 函数供外部调用（但已无需）
 def setup_environment():
-    pass   # 留空，或调用 _load_dll()
+    pass

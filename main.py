@@ -16,19 +16,16 @@ from fps_monitor import FPSMonitor
 # ---------- 日志配置 ----------
 def setup_logging(debug=False):
     logger = logging.getLogger(__name__)
-    logger.setLevel(logging.DEBUG)  # 根级别设为 DEBUG，通过 handler 控制输出
+    logger.setLevel(logging.DEBUG)
 
-    # 移除可能已存在的 handler（避免重复）
     for handler in logger.handlers[:]:
         logger.removeHandler(handler)
 
-    # 控制台 handler（根据 debug 决定级别）
     console = logging.StreamHandler(sys.stdout)
     console.setLevel(logging.DEBUG if debug else logging.INFO)
     console.setFormatter(logging.Formatter('[%(asctime)s] [%(levelname)s] %(message)s', datefmt='%H:%M:%S'))
     logger.addHandler(console)
 
-    # 文件 handler（仅当 debug 时启用）
     if debug:
         try:
             file_handler = logging.FileHandler('osd_debug.log', encoding='utf-8')
@@ -39,12 +36,11 @@ def setup_logging(debug=False):
         except Exception as e:
             logger.error(f"创建日志文件失败: {e}")
 
-    # 抑制第三方库的日志
     logging.getLogger('PyQt5').setLevel(logging.WARNING)
     logging.getLogger('clr').setLevel(logging.WARNING)
     return logger
 
-# ---------- 管理员权限检查与提权 ----------
+# ---------- 管理员权限 ----------
 def is_admin():
     try:
         return ctypes.windll.shell32.IsUserAnAdmin()
@@ -63,7 +59,7 @@ def run_as_admin():
         print(f"申请管理员权限失败: {e}")
         return False
 
-# ---------- 监控线程类 ----------
+# ---------- 监控线程 ----------
 class MonitorThread(QThread):
     data_updated = pyqtSignal(object, object, object, object)
 
@@ -86,7 +82,7 @@ class MonitorThread(QThread):
             try:
                 self.hw_monitor.update()
                 cpu = self.hw_monitor.get_cpu_data()
-                gpu = self.hw_monitor.get_gpu_data()
+                gpu_list = self.hw_monitor.get_all_gpu_data()
                 nets = self.hw_monitor.get_net_data()
                 net = nets[0] if nets else None
                 fps_dict = self.fps_monitor.get_fps_info()
@@ -99,7 +95,7 @@ class MonitorThread(QThread):
                     frametime_avg=fps_dict.get("frametime_avg", 0.0),
                     frame_count=fps_dict.get("frame_count", 0)
                 )
-                self.data_updated.emit(cpu, gpu, net, fps)
+                self.data_updated.emit(cpu, gpu_list, net, fps)
             except Exception as e:
                 self.logger.error(f"监控数据更新异常: {e}", exc_info=True)
             self.msleep(self.interval)
@@ -115,18 +111,14 @@ class MonitorThread(QThread):
         self.fps_monitor.close()
         self.logger.info("硬件监控与PresentMon已关闭")
 
-
 # ---------- 主程序 ----------
 def main():
-    # 解析命令行参数
     parser = argparse.ArgumentParser(description='Performance Monitor OSD')
     parser.add_argument('--debug', action='store_true', help='启用调试日志')
     args, unknown = parser.parse_known_args()
 
-    # 配置日志（此时还未获得 logger，先创建一个临时 logger 用于早期信息）
     logger = setup_logging(args.debug)
 
-    # 检查管理员权限
     if sys.platform == 'win32':
         if not is_admin():
             logger.warning("当前未以管理员身份运行，正在申请提权...")
@@ -141,26 +133,33 @@ def main():
     logger.info("Performance Monitor OSD 启动")
     logger.debug(f"命令行参数: {sys.argv}")
 
-    # 加载配置
+    # ---------- 新增：确保配置文件存在 ----------
+    from settings import get_config_path
+    config_path = get_config_path()
+    logger.info(f"配置文件路径: {config_path}")
+
     try:
-        settings = Settings.load()
+        if not os.path.exists(config_path):
+            logger.warning("配置文件不存在，创建默认配置...")
+            settings = Settings()
+            settings.save()
+        else:
+            settings = Settings.load()
         logger.debug("配置加载成功")
     except Exception as e:
         logger.error(f"配置加载失败: {e}")
         settings = Settings()
 
-    # 初始化 Qt 应用
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon.fromTheme("utilities-system-monitor", QIcon()))
 
-    # 创建 OSD 窗口
     osd = OSDWindow(settings)
     tray = SystemTray()
     monitor_thread = MonitorThread(settings.window.update_interval, logger=logger)
     monitor_thread.data_updated.connect(osd.update_data)
     monitor_thread.start()
 
-    # ---------- 定义交互函数（在连接信号之前） ----------
+    # ---------- 交互函数 ----------
     def toggle_osd():
         if osd.isVisible():
             osd.hide()
@@ -179,7 +178,20 @@ def main():
         monitor_thread.interval = settings.window.update_interval
 
     def show_settings():
+        # 获取所有 GPU 数据
+        gpu_data_list = monitor_thread.hw_monitor.get_all_gpu_data()
+        # 提取名称和有效性
+        gpu_names = []
+        gpu_valid = []
+        for gpu in gpu_data_list:
+            gpu_names.append(gpu.name)
+            valid = (gpu.usage is not None or gpu.temperature is not None or
+                     gpu.frequency is not None or gpu.memory_total is not None or
+                     gpu.power is not None or gpu.voltage is not None)
+            gpu_valid.append(valid)
+
         dlg = SettingsDialog(settings, parent=osd)
+        dlg.update_gpu_list(gpu_names, gpu_valid)
         dlg.settings_changed.connect(on_settings_changed)
         dlg.exec_()
 
@@ -195,14 +207,11 @@ def main():
     tray.pin_toggled.connect(toggle_pin)
     tray.set_pinned_state(settings.window.pinned)
 
-    # 显示界面
     tray.show()
     osd.show()
 
-    # 注册退出清理
     atexit.register(lambda: monitor_thread.cleanup())
 
-    # 运行
     sys.exit(app.exec_())
 
 if __name__ == "__main__":
