@@ -918,7 +918,7 @@ class SettingsDialog(QDialog):
         self._build_tab_layout()
         self._build_tab_about()
 
-        btn_close = QPushButton("关闭")
+        btn_close = QPushButton("保存并关闭")   # 修改点：明确为保存并关闭，避免用户误解为退出程序
         btn_close.setMinimumHeight(26)
         btn_close.setMinimumWidth(80)
         btn_close.clicked.connect(self.close)
@@ -1046,7 +1046,7 @@ class SettingsDialog(QDialog):
         g_label_color.setLayout(lbl_layout)
         lay.addWidget(g_label_color)
 
-        # ---- 新增：配置文件路径显示 ----
+        # ---- 配置文件路径显示 ----
         from settings import get_config_path
         g_path = QGroupBox("配置文件位置")
         l_path = QHBoxLayout()
@@ -1460,14 +1460,14 @@ class SettingsDialog(QDialog):
         about_html = """
         <div style="font-family: 'Microsoft YaHei', 'Segoe UI', sans-serif; color: #E0E0E0; padding: 8px; line-height: 1.6;">
             <h2 style="color: #4A9EFF; text-align: center; margin-bottom: 4px;">Performance Monitor OSD</h2>
-            <p style="text-align: center; color: #B0B0B0; font-size: 14px; margin-top: 0;">轻量级性能监控悬浮窗 &mdash; 版本 1.2</p>
+            <p style="text-align: center; color: #B0B0B0; font-size: 14px; margin-top: 0;">轻量级性能监控悬浮窗 &mdash; 版本 1.2.0</p>
             <hr style="border-color: #3A3A4A; margin: 12px 0;">
 
             <h3 style="color: #FFD700; margin-bottom: 4px;">📖 项目简介</h3>
             <p style="margin-top: 0; color: #D0D0D0;">
                 一款专为游戏玩家和性能发烧友设计的实时硬件监控工具，以透明悬浮窗形式显示 CPU、GPU、网络及 FPS 关键指标。
                 支持双布局、模块顺序调整、智能隐藏，所有标签和颜色可自定义，不干扰您的游戏或工作。
-            <li><b>开源地址：</b> &mdash;> <a href="https://github.com/Xyhshell/performance-monitor-osd" style="color: #4A9EFF; text-decoration: none;">GitHub</a></li>
+                <li><b>开源地址：</b> &mdash;> <a href="https://github.com/Xyhshell/performance-monitor-osd" style="color: #4A9EFF; text-decoration: none;">GitHub</a></li>
             </p>
 
             <h3 style="color: #FFD700; margin-bottom: 4px;">✨ 主要特性</h3>
@@ -1731,6 +1731,7 @@ class SettingsDialog(QDialog):
         self._update_gpu_checkbox_visibility(mode)
 
     def closeEvent(self, event):
+        # 仅保存设置，不退出程序
         self._settings.save()
         event.accept()
 
